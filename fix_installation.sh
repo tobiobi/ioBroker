@@ -1,52 +1,35 @@
-#!/bin/bash
+#!/usr/bin/env bash
 
 # Increase this version number whenever you update the fixer
-FIXER_VERSION="2019-07-21" # format YYYY-MM-DD
+FIXER_VERSION="2020-12-07" # format YYYY-MM-DD
 
 # Test if this script is being run as root or not
-if [[ $EUID -eq 0 ]]; then
-	IS_ROOT=true
-else
-	IS_ROOT=false
-fi
+if [[ $EUID -eq 0 ]];
+then IS_ROOT=true;  SUDOX=""
+else IS_ROOT=false; SUDOX="sudo "; fi
 ROOT_GROUP="root"
+USER_GROUP="$USER"
+
+# get and load the LIB => START
+LIB_NAME="installer_library.sh"
+LIB_URL="https://raw.githubusercontent.com/ioBroker/ioBroker/master/$LIB_NAME"
+# get and load the LIB
+curl -sL $LIB_URL > ~/$LIB_NAME
+if test -f ~/$LIB_NAME; then source ~/$LIB_NAME; else echo "Installer/Fixer: library not found"; exit -2; fi
+# Delete the lib again. We have sourced it so we don't need it anymore
+rm ~/$LIB_NAME
+# get and load the LIB => END
+
+# test one function of the library
+RET=$(get_lib_version)
+if [ $? -ne 0 ]; then echo "Installer/Fixer: library $LIB_NAME could not be loaded!"; exit -2; fi
+if [ "$RET" == "" ]; then echo "Installer/Fixer: library $LIB_NAME does not work."; exit -2; fi
+echo "Library version=$RET"
+
+
 # Test which platform this script is being run on
-unamestr=$(uname)
-if [ "$unamestr" = "Linux" ]; then
-	HOST_PLATFORM="linux"
-elif [ "$unamestr" = "Darwin" ]; then
-	# OSX and Linux are the same in terms of install procedure
-	HOST_PLATFORM="osx"
-	ROOT_GROUP="wheel"
-elif [ "$unamestr" = "FreeBSD" ]; then
-	HOST_PLATFORM="freebsd"
-	ROOT_GROUP="wheel"
-else
-	echo "Unsupported platform!"
-	exit 1
-fi
-
-# Adds dirs to the PATH variable without duplicating entries
-add_to_path() {
-	case ":$PATH:" in
-		*":$1:"*) :;; # already there
-		*) PATH="$1:$PATH";;
-	esac
-}
-# Starting with Debian 10 (Buster), we need to add the [/usr[/local]]/sbin
-# directories to PATH for non-root users
-if [ -d "/sbin" ]; then add_to_path "/sbin"; fi
-if [ -d "/usr/sbin" ]; then add_to_path "/usr/sbin"; fi
-if [ -d "/usr/local/sbin" ]; then add_to_path "/usr/local/sbin"; fi
-
-
-# Directory where iobroker should be installed
-IOB_DIR="/opt/iobroker"
-if [ "$HOST_PLATFORM" = "osx" ]; then
-	IOB_DIR="/usr/local/iobroker"
-fi
-CONTROLLER_DIR="$IOB_DIR/node_modules/iobroker.js-controller"
-INSTALLER_INFO_FILE="$IOB_DIR/INSTALLER_INFO.txt"
+get_platform_params
+set_some_common_params
 
 # Test if ioBroker is installed
 if [ ! -d "$IOB_DIR" ] || [ ! -d "$CONTROLLER_DIR" ]; then
@@ -70,447 +53,23 @@ fi
 echo "Fixer version: $FIXER_VERSION" >> $INSTALLER_INFO_FILE
 echo "Fix date $(date +%F)" >> $INSTALLER_INFO_FILE
 
-# The user to run ioBroker as
-IOB_USER="iobroker"
-if [ "$HOST_PLATFORM" = "osx" ]; then
-	IOB_USER="$USER"
+
+if [ "$IS_ROOT" = true ]; then
+	print_bold "Welcome to the ioBroker installation fixer!" "Script version: $FIXER_VERSION"
+else
+	print_bold "Welcome to the ioBroker installation fixer!" "Script version: $FIXER_VERSION" "" "You might need to enter your password a couple of times."
 fi
-
-# Where the fixer script is located
-FIXER_URL="https://iobroker.net/fix.sh"
-
-# Test if we're running inside a docker container
-running_in_docker() {
-	awk -F/ '$2 == "docker"' /proc/self/cgroup | read
-}
-
-# Enable colored output
-if test -t 1; then # if terminal
-	ncolors=$(which tput > /dev/null && tput colors) # supports color
-	if test -n "$ncolors" && test $ncolors -ge 8; then
-		termcols=$(tput cols)
-		bold="$(tput bold)"
-		underline="$(tput smul)"
-		standout="$(tput smso)"
-		normal="$(tput sgr0)"
-		black="$(tput setaf 0)"
-		red="$(tput setaf 1)"
-		green="$(tput setaf 2)"
-		yellow="$(tput setaf 3)"
-		blue="$(tput setaf 4)"
-		magenta="$(tput setaf 5)"
-		cyan="$(tput setaf 6)"
-		white="$(tput setaf 7)"
-	fi
-fi
-
-HLINE="=========================================================================="
-
-print_step() {
-	stepname="$1"
-	stepnr="$2"
-	steptotal="$3"
-
-	echo
-	echo "${bold}${HLINE}${normal}"
-	echo "${bold}    ${stepname} ${blue}(${stepnr}/${steptotal})${normal}"
-	echo "${bold}${HLINE}${normal}"
-	echo
-}
-
-print_bold() {
-	title="$1"
-	echo
-	echo "${bold}${HLINE}${normal}"
-	echo
-	echo "    ${bold}${title}${normal}"
-	for text in "${@:2}"; do
-		echo "    ${text}"
-	done
-	echo
-	echo "${bold}${HLINE}${normal}"
-	echo
-}
-
-
-print_msg() {
-	text="$1"
-	echo
-	echo -e "${text}"
-	echo
-}
-
-set_root_permissions() {
-	file="$1"
-	if [ "$IS_ROOT" = true ]; then
-		chown root:$ROOT_GROUP $file
-		chmod 755 $file
-	else
-		sudo chown root:$ROOT_GROUP $file
-		sudo chmod 755 $file
-	fi
-}
-
-make_executable() {
-	file="$1"
-	if [ "$IS_ROOT" = true ]; then
-		chmod 755 $file
-	else
-		sudo chmod 755 $file
-	fi
-}
-
-change_owner() {
-	user="$1"
-	file="$2"
-	if [ "$HOST_PLATFORM" == "osx" ]; then
-		owner="$user"
-	else
-		owner="$user:$user"
-	fi
-	cmdline="chown"
-	if [ "$IS_ROOT" != true ]; then
-		# use sudo as non-root
-		cmdline="sudo $cmdline"
-	fi
-	if [ -d $file ]; then
-		# recursively chown directories
-		cmdline="$cmdline -R"
-	elif [ -L $file ]; then
-		# change ownership of symbolic links
-		cmdline="$cmdline -h"
-	fi
-	$cmdline $owner $file
-}
-
-create_user_linux() {
-	username="$1"
-	id "$username" &> /dev/null;
-	if [ $? -ne 0 ]; then
-		# User does not exist
-		if [ "$IS_ROOT" = true ]; then
-			useradd -m -s /usr/sbin/nologin "$username"
-		else
-			sudo useradd -m -s /usr/sbin/nologin "$username"
-		fi
-		echo "User $username created"
-	fi
-	# Add the current non-root user to the iobroker group so he can access the iobroker dir
-	if [ "$username" != "$USER" ] && [ "$IS_ROOT" = false ]; then
-		sudo usermod -a -G $username $USER
-	fi
-
-	# Add the user to all groups we need and give him passwordless sudo privileges
-	# Define which commands iobroker may execute as sudo without password
-	declare -a iob_commands=(
-		"shutdown -h now" "halt" "poweroff" "reboot"
-		"systemctl start" "systemctl stop"
-		"mount" "umount" "systemd-run"
-		"apt-get" "apt" "dpkg" "make"
-		"ping" "fping"
-		"arp-scan"
-		"setcap"
-		"vcgencmd"
-		"cat"
-		"df"
-	)
-
-	SUDOERS_CONTENT="$username ALL=(ALL) ALL\n"
-	for cmd in "${iob_commands[@]}"; do
-		# Test each command if and where it is installed
-		cmd_bin=$(echo $cmd | cut -d ' ' -f1)
-		cmd_path=$(which $cmd_bin 2> /dev/null)
-		if [ $? -eq 0 ]; then
-			# Then add the command to SUDOERS_CONTENT
-			full_cmd=$(echo "$cmd" | sed -e "s|$cmd_bin|$cmd_path|")
-			SUDOERS_CONTENT+="$username ALL=(ALL) NOPASSWD: $full_cmd\n"
-		fi
-	done
-
-	# Additionally, define which iobroker-related commands may be executed by every user
-	declare -a all_user_commands=(
-		"systemctl start iobroker"
-		"systemctl stop iobroker"
-		"systemctl restart iobroker"
-	)
-	for cmd in "${all_user_commands[@]}"; do
-		# Test each command if and where it is installed
-		cmd_bin=$(echo $cmd | cut -d ' ' -f1)
-		cmd_path=$(which $cmd_bin 2> /dev/null)
-		if [ $? -eq 0 ]; then
-			# Then add the command to SUDOERS_CONTENT
-			full_cmd=$(echo "$cmd" | sed -e "s|$cmd_bin|$cmd_path|")
-			SUDOERS_CONTENT+="ALL ALL=NOPASSWD: $full_cmd\n"
-		fi
-	done
-
-	# Furthermore, allow all users to execute node iobroker.js as iobroker
-	if [ "$IOB_USER" != "$USER" ]; then
-		cmd="node $CONTROLLER_DIR/iobroker.js"
-		cmd_bin=$(echo $cmd | cut -d ' ' -f1)
-		cmd_path=$(which $cmd_bin 2> /dev/null)
-		if [ $? -eq 0 ]; then
-			# Then add the command to SUDOERS_CONTENT
-			full_cmd=$(echo "$cmd" | sed -e "s|$cmd_bin|$cmd_path|")
-			SUDOERS_CONTENT+="ALL ALL=($IOB_USER) NOPASSWD: $full_cmd\n"
-		fi
-	fi
-	# TODO: ^ Can we reduce code repetition in these 3 blocks? ^
-
-	SUDOERS_FILE="/etc/sudoers.d/iobroker"
-	if [ "$IS_ROOT" = true ]; then
-		rm -f $SUDOERS_FILE
-		echo -e "$SUDOERS_CONTENT" > ~/temp_sudo_file
-		visudo -c -q -f ~/temp_sudo_file && \
-			chown root:$ROOT_GROUP ~/temp_sudo_file &&
-			chmod 440 ~/temp_sudo_file &&
-			mv ~/temp_sudo_file $SUDOERS_FILE &&
-			echo "Created $SUDOERS_FILE"
-	else
-		sudo rm -f $SUDOERS_FILE
-		echo -e "$SUDOERS_CONTENT" > ~/temp_sudo_file
-		sudo visudo -c -q -f ~/temp_sudo_file && \
-			sudo chown root:$ROOT_GROUP ~/temp_sudo_file &&
-			sudo chmod 440 ~/temp_sudo_file &&
-			sudo mv ~/temp_sudo_file $SUDOERS_FILE &&
-			echo "Created $SUDOERS_FILE"
-	fi
-	# Add the user to all groups if they exist
-	declare -a groups=(
-		audio
-		bluetooth
-		dialout
-		gpio
-		i2c
-		redis
-		tty
-	)
-	for grp in "${groups[@]}"; do
-		if [ "$IS_ROOT" = true ]; then
-			getent group $grp &> /dev/null && usermod -a -G $grp $username
-		else
-			getent group $grp &> /dev/null && sudo usermod -a -G $grp $username
-		fi
-	done
-}
-
-create_user_freebsd() {
-	username="$1"
-	id "$username" &> /dev/null
-	if [ $? -ne 0 ]; then
-		# User does not exist
-		if [ "$IS_ROOT" = true ]; then
-			pw useradd -m -s /usr/sbin/nologin -n "$username"
-		else
-			sudo pw useradd -m -s /usr/sbin/nologin -n "$username"
-		fi
-	fi
-	# Add the user to all groups we need and give him passwordless sudo privileges
-	# Define which commands may be executed as sudo without password
-	# TODO: Find out the correct paths on FreeBSD
-	# SUDOERS_FILE="/usr/local/etc/sudoers.d/iobroker"
-
-	# Add the user to all groups if they exist
-	declare -a groups=(
-		audio
-		bluetooth
-		dialout
-		gpio
-		i2c
-		redis
-		tty
-	)
-	for grp in "${groups[@]}"; do
-		if [ "$IS_ROOT" = true ]; then
-			getent group $grp && pw group mod $grp -m $username
-		else
-			getent group $grp && sudo pw group mod $grp -m $username
-		fi
-	done
-}
-
-install_package_linux() {
-	package="$1"
-	# Test if the package is installed
-	dpkg -s "$package" &> /dev/null
-	if [ $? -ne 0 ]; then
-		# Install it
-		if [ "$IS_ROOT" = true ]; then
-			apt-get install -yq --no-install-recommends $package > /dev/null
-		else
-			sudo apt-get install -yq --no-install-recommends $package > /dev/null
-		fi
-		echo "Installed $package"
-	fi
-}
-
-install_package_freebsd() {
-	package="$1"
-	# check if package is installed (pkg is nice enough to provide us with a exitcode)
-	if ! pkg info "$1" >/dev/null 2>&1; then
-		# Install it
-		if [ "$IS_ROOT" = true ]; then
-			pkg install --yes --quiet "$1" > /dev/null
-		else
-			sudo pkg install --yes --quiet "$1" > /dev/null
-		fi
-		echo "Installed $package"
-	fi
-}
-
-install_package_macos() {
-	package="$1"
-	# Test if the package is installed (Use brew to install essential tools)
-	brew list | grep "$package" &> /dev/null
-	if [ $? -ne 0 ]; then
-		# Install it
-		brew install $package &> /dev/null
-		if [ $? -eq 0 ]; then
-			echo "Installed $package"
-		else
-			echo "$package was not installed"
-		fi
-	fi
-}
-
-
-fix_dir_permissions() {
-	# Give the user access to all necessary directories
-	echo "Fixing directory permissions..."
-	# ioBroker install dir
-	change_owner $IOB_USER $IOB_DIR
-	# and the npm cache dir
-	if [ -d "/home/$IOB_USER/.npm" ]; then
-		change_owner $IOB_USER "/home/$IOB_USER/.npm"
-	fi
-	if [ "$IS_ROOT" != true ]; then
-		# To allow the current user to install adapters via the shell,
-		# We need to give it access rights to the directory aswell
-		sudo usermod -a -G $IOB_USER $USER
-	fi
-	# Give the iobroker group write access to all files by setting the default ACL
-	if [ "$IS_ROOT" = true ]; then
-		setfacl -Rdm g:$IOB_USER:rwx $IOB_DIR &> /dev/null && setfacl -Rm g:$IOB_USER:rwx $IOB_DIR &> /dev/null
-	else
-		sudo setfacl -Rdm g:$IOB_USER:rwx $IOB_DIR &> /dev/null && sudo setfacl -Rm g:$IOB_USER:rwx $IOB_DIR &> /dev/null
-	fi
-	if [ $? -ne 0 ]; then
-		# We cannot rely on default permissions on this system
-		echo "${yellow}This system does not support setting default permissions.${normal}"
-		echo "${yellow}Do not use npm to manually install adapters unless you know what you are doing!${normal}"
-		echo "ACL enabled: false" >> $INSTALLER_INFO_FILE
-	else
-		echo "ACL enabled: true" >> $INSTALLER_INFO_FILE
-	fi
-}
-
-print_bold "Welcome to the ioBroker installation fixer!" "Script version: $FIXER_VERSION" "" "You might need to enter your password a couple of times."
 
 NUM_STEPS=3
 
 # ########################################################
 print_step "Installing prerequisites" 1 "$NUM_STEPS"
-# Determine the platform we operate on and select the installation routine/packages accordingly 
-case "$HOST_PLATFORM" in
-	"linux")
-		declare -a packages=(
-			"acl" # To use setfacl
-			"sudo" # To use sudo (obviously)
-			"libcap2-bin" # To give nodejs access to protected ports
-			# These are used by a couple of adapters and should therefore exist:
-			"build-essential"
-			"libavahi-compat-libdnssd-dev"
-			"libudev-dev"
-			"libpam0g-dev"
-			"pkg-config"
-			"git"
-			"curl"
-			"unzip"
-		)
-		for pkg in "${packages[@]}"; do
-			install_package_linux $pkg
-		done
 
-		# ==================
-		# Configure packages
+# update repos
+$SUDOX $INSTALL_CMD $INSTALL_CMD_UPD_ARGS update
 
-		# Give nodejs access to protected ports and raw devices like ble
-		cmdline="setcap"
-		if [ "$IS_ROOT" != true ]; then
-			# use sudo as non-root
-			cmdline="sudo $cmdline"
-		fi
-	
-		if running_in_docker; then
-			capabilities=$(grep ^CapBnd /proc/$$/status)
-			if [[ $(capsh --decode=${capabilities:(-16)}) == *"cap_net_admin"* ]]; then
-				$cmdline 'cap_net_admin,cap_net_bind_service,cap_net_raw+eip' $(eval readlink -f `which node`)
-			else
-				$cmdline 'cap_net_bind_service,cap_net_raw+eip' $(eval readlink -f `which node`)
-				echo "${yellow}Docker detected!"
-				echo "If you have any adapters that need the CAP_NET_ADMIN capability,"
-				echo "you need to start the docker container with the option --cap-add=NET_ADMIN"
-				echo "and manually add that capability to node${normal}"
-			fi
-		else
-			$cmdline 'cap_net_admin,cap_net_bind_service,cap_net_raw+eip' $(eval readlink -f `which node`)
-		fi
-		;;
-	"freebsd")
-		declare -a packages=(
-			"sudo"
-			"git"
-			"curl"
-			"bash"
-			"unzip"
-			"avahi-libdns" # avahi gets installed along with this
-			"dbus"
-			"nss_mdns" # needed for the mdns host resolution 
-			"gcc"
-			"python" # Required for node-gyp compilation
-		)
-		for pkg in "${packages[@]}"; do
-			install_package_freebsd $pkg
-		done
-		# we need to do some settting up things after installing the packages
-		# ensure dns_sd.h is where node-gyp expect it 
-		ln -s /usr/local/include/avahi-compat-libdns_sd/dns_sd.h /usr/include/dns_sd.h
-		# enable dbus in the avahi configuration
-		sed -i -e 's/#enable-dbus/enable-dbus/' /usr/local/etc/avahi/avahi-daemon.conf
-		# enable mdns usage for host resolution
-		sed -i -e 's/hosts: file dns/hosts: file dns mdns/' /etc/nsswitch.conf
-
-		# enable services avahi/dbus
-		sysrc -f /etc/rc.conf dbus_enable="YES"
-		sysrc -f /etc/rc.conf avahi_daemon_enable="YES"
-
-		# start services
-		service dbus start
-		service avahi-daemon start
-		;;
-	"osx")
-		# Test if brew is installed. If it is, install some packages that are often used.
-		brew -v &> /dev/null
-		if [ $? -eq 0 ]; then
-			declare -a packages=(
-				# These are used by a couple of adapters and should therefore exist:
-				"pkg-config"
-				"git"
-				"curl"
-				"unzip"
-			)
-			for pkg in "${packages[@]}"; do
-				install_package_macos $pkg
-			done
-		else
-			echo "${yellow}Since brew is not installed, frequently-used dependencies could not be installed."
-			echo "Before installing some adapters, you might have to install some packages yourself."
-			echo "Please check the adapter manuals before installing them.${normal}"
-		fi
-		;;
-	*)
-		;;
-esac
+# Determine the platform we operate on and select the installation routine/packages accordingly
+install_necessary_packages
 
 # ########################################################
 print_step "Checking ioBroker user and directory permissions" 2 "$NUM_STEPS"
@@ -523,11 +82,21 @@ if [ "$USER" != "$IOB_USER" ]; then
 	fi
 fi
 
-# Make sure that the app dir belongs to the correct user
-# Don't do it on OSX, because we'll install as the current user anyways
-if [ "$HOST_PLATFORM" != "osx" ]; then
-	fix_dir_permissions
+cd $IOB_DIR
+# Disable any warnings related to "npm audit fix"
+disable_npm_audit
+
+# Enforce strict version checks before installing new packages
+force_strict_npm_version_checks
+
+# Force npm to run as iobroker when inside IOB_DIR
+if [[ "$IS_ROOT" != true && "$USER" != "$IOB_USER" ]]; then
+	change_npm_command_user
 fi
+change_npm_command_root
+
+# Make sure that the app dir belongs to the correct user
+fix_dir_permissions
 
 # ########################################################
 print_step "Checking autostart" 3 "$NUM_STEPS"
@@ -535,33 +104,19 @@ print_step "Checking autostart" 3 "$NUM_STEPS"
 # First delete all possible remains of an old installation
 INITD_FILE="/etc/init.d/iobroker.sh"
 if [ -f "$INITD_FILE" ]; then
-	if [ "$IS_ROOT" = true ]; then
-		rm "$INITD_FILE"
-	else
-		sudo rm "$INITD_FILE"
-	fi
+	$SUDOX rm "$INITD_FILE"
 fi
 
 SYSTEMD_FILE="/lib/systemd/system/iobroker.service"
 if [ -f "$SYSTEMD_FILE" ]; then
-	if [ "$IS_ROOT" = true ]; then
-		rm "$SYSTEMD_FILE"
-		systemctl stop iobroker &> /dev/null
-		systemctl daemon-reload
-	else
-		sudo rm "$SYSTEMD_FILE"
-		systemctl stop iobroker &> /dev/null
-		sudo systemctl daemon-reload
-	fi
+	$SUDOX rm "$SYSTEMD_FILE"
+	systemctl stop iobroker &> /dev/null
+	$SUDOX systemctl daemon-reload
 fi
 
 RCD_FILE="/usr/local/etc/rc.d/iobroker"
 if [ -f "$RCD_FILE" ]; then
-	if [ "$IS_ROOT" = true ]; then
-		rm "$RCD_FILE"
-	else
-		sudo rm "$RCD_FILE"
-	fi
+	$SUDOX rm "$RCD_FILE"
 	sysrc iobroker_enable-=YES
 fi
 
@@ -581,7 +136,7 @@ INITSYSTEM="unknown"
 if [[ "$HOST_PLATFORM" = "freebsd" && -d "/usr/local/etc/rc.d" ]]; then
 	INITSYSTEM="rc.d"
 	SERVICE_FILENAME="/usr/local/etc/rc.d/iobroker"
-elif [[ `systemctl` =~ -\.mount ]] &> /dev/null; then 
+elif [[ `systemctl` =~ -\.mount ]] &> /dev/null; then
 	INITSYSTEM="systemd"
 	SERVICE_FILENAME="/lib/systemd/system/iobroker.service"
 elif [[ -f /etc/init.d/cron && ! -h /etc/init.d/cron ]]; then
@@ -600,7 +155,6 @@ echo "init system: $INITSYSTEM" >> $INSTALLER_INFO_FILE
 # Create "iob" and "iobroker" executables
 # If possible, try to always execute the iobroker CLI as the correct user
 IOB_NODE_CMDLINE="node"
-BASH_CMDLINE=$(which bash)
 if [ "$IOB_USER" != "$USER" ]; then
 	IOB_NODE_CMDLINE="sudo -H -u $IOB_USER node"
 fi
@@ -614,7 +168,7 @@ if [ "$INITSYSTEM" = "systemd" ]; then
 		elif [ "\$1" = "fix" ]; then
 			curl -sL $FIXER_URL | bash -
 		else
-			$IOB_NODE_CMDLINE $CONTROLLER_DIR/iobroker.js \$@
+			$IOB_NODE_CMDLINE $CONTROLLER_DIR/iobroker.js "\$@"
 		fi
 		EOF
 	)
@@ -630,7 +184,7 @@ elif [ "$INITSYSTEM" = "launchctl" ]; then
 		elif [ "\$1" = "fix" ]; then
 			curl -sL $FIXER_URL | bash -
 		else
-			$IOB_NODE_CMDLINE $CONTROLLER_DIR/iobroker.js \$@
+			$IOB_NODE_CMDLINE $CONTROLLER_DIR/iobroker.js "\$@"
 		fi
 		EOF
 	)
@@ -640,7 +194,7 @@ else
 		if [ "\$1" = "fix" ]; then
 			curl -sL $FIXER_URL | bash -
 		else
-			$IOB_NODE_CMDLINE $CONTROLLER_DIR/iobroker.js \$@
+			$IOB_NODE_CMDLINE $CONTROLLER_DIR/iobroker.js "\$@"
 		fi
 		EOF
 	)
@@ -651,35 +205,21 @@ elif [ "$HOST_PLATFORM" = "freebsd" ] || [ "$HOST_PLATFORM" = "osx" ]; then
 	IOB_BIN_PATH=/usr/local/bin
 fi
 # First remove the old binaries and symlinks
-if [ "$IS_ROOT" = true ]; then
-	rm -f $IOB_DIR/iobroker 
-	rm -f $IOB_BIN_PATH/iobroker
-	rm -f $IOB_DIR/iob
-	rm -f $IOB_BIN_PATH/iob
-else
-	sudo rm -f $IOB_DIR/iobroker 
-	sudo rm -f $IOB_BIN_PATH/iobroker
-	sudo rm -f $IOB_DIR/iob
-	sudo rm -f $IOB_BIN_PATH/iob
-fi
+$SUDOX rm -f $IOB_DIR/iobroker
+$SUDOX rm -f $IOB_BIN_PATH/iobroker
+$SUDOX rm -f $IOB_DIR/iob
+$SUDOX rm -f $IOB_BIN_PATH/iob
 
 # Symlink the global binaries iob and iobroker
-if [ "$IS_ROOT" = true ]; then
-	ln -sfn $IOB_DIR/iobroker $IOB_BIN_PATH/iobroker
-	ln -sfn $IOB_DIR/iobroker $IOB_BIN_PATH/iob
-else
-	sudo ln -sfn $IOB_DIR/iobroker $IOB_BIN_PATH/iobroker
-	sudo ln -sfn $IOB_DIR/iob $IOB_BIN_PATH/iob
-fi
+$SUDOX ln -sfn $IOB_DIR/iobroker $IOB_BIN_PATH/iobroker
+$SUDOX ln -sfn $IOB_DIR/iobroker $IOB_BIN_PATH/iob
 # Symlink the local binary iob
-if [ "$IS_ROOT" = true ]; then
-	ln -sfn $IOB_DIR/iobroker $IOB_DIR/iob
-else
-	sudo ln -sfn $IOB_DIR/iobroker $IOB_DIR/iob
-fi
+$SUDOX ln -sfn $IOB_DIR/iobroker $IOB_DIR/iob
+
 # Create executables in the ioBroker directory
-echo "$IOB_EXECUTABLE" > $IOB_DIR/iobroker
+write_to_file "$IOB_EXECUTABLE" $IOB_DIR/iobroker
 make_executable "$IOB_DIR/iobroker"
+
 # and give them the correct ownership
 change_owner $IOB_USER "$IOB_DIR/iobroker"
 change_owner $IOB_USER "$IOB_DIR/iob"
@@ -733,13 +273,9 @@ if [[ "$INITSYSTEM" = "init.d" ]]; then
 	)
 
 	# Create the startup file, give it the correct permissions and start ioBroker
-	if [ "$IS_ROOT" = true ]; then
-		echo "$INITD_FILE" > $SERVICE_FILENAME
-		set_root_permissions $SERVICE_FILENAME
-	else
-		echo "$INITD_FILE" | sudo tee $SERVICE_FILENAME &> /dev/null
-		set_root_permissions $SERVICE_FILENAME
-	fi
+	write_to_file "$INITD_FILE" $SERVICE_FILENAME
+	set_root_permissions $SERVICE_FILENAME
+
 	# Remember what we did
 	if [[ $IOB_FORCE_INITD && ${IOB_FORCE_INITD-x} ]]; then
 		echo "Autostart: init.d (forced)" >> "$INSTALLER_INFO_FILE"
@@ -754,36 +290,31 @@ elif [ "$INITSYSTEM" = "systemd" ]; then
 		[Unit]
 		Description=ioBroker Server
 		Documentation=http://iobroker.net
-		After=network.target redis.service
-		Wants=redis.service
-		
+		After=network.target redis.service influxdb.service mysql-server.service mariadb-server.service
+		Wants=redis.service influxdb.service mysql-server.service mariadb-server.service
+
 		[Service]
 		Type=simple
 		User=$IOB_USER
 		Environment="NODE=\$(which node)"
 		ExecStart=$BASH_CMDLINE -c '\${NODE} $CONTROLLER_DIR/controller.js'
 		Restart=on-failure
-		
+
 		[Install]
 		WantedBy=multi-user.target
 		EOF
 	)
 
 	# Create the startup file and give it the correct permissions
-	if [ "$IS_ROOT" = true ]; then
-		echo "$SYSTEMD_FILE" > $SERVICE_FILENAME
-		chmod 644 $SERVICE_FILENAME
 
-		systemctl daemon-reload
-		systemctl enable iobroker
-	else
-		echo "$SYSTEMD_FILE" | sudo tee $SERVICE_FILENAME &> /dev/null
+	write_to_file "$SYSTEMD_FILE" $SERVICE_FILENAME
+	if [ "$IS_ROOT" != true ]; then
 		sudo chown root:$ROOT_GROUP $SERVICE_FILENAME
-		sudo chmod 644 $SERVICE_FILENAME
-
-		sudo systemctl daemon-reload
-		sudo systemctl enable iobroker
 	fi
+	$SUDOX chmod 644 $SERVICE_FILENAME
+	$SUDOX systemctl daemon-reload
+	$SUDOX systemctl enable iobroker
+
 	echo "Autostart enabled!"
 	echo "Autostart: systemd" >> "$INSTALLER_INFO_FILE"
 
@@ -792,7 +323,7 @@ elif [ "$INITSYSTEM" = "rc.d" ]; then
 
 	# Write an rc.d service that automatically detects the correct node executable and runs ioBroker
 	RCD_FILE=$(cat <<- EOF
-		#!/bin/sh
+		#!$BASH_CMDLINE
 		#
 		# PROVIDE: iobroker
 		# REQUIRE: DAEMON
@@ -809,21 +340,20 @@ elif [ "$INITSYSTEM" = "rc.d" ]; then
 		iobroker_pidfile=\${iobroker_pidfile-"$CONTROLLER_DIR/lib/iobroker.pid"}
 
 		PIDF=$CONTROLLER_DIR/lib/iobroker.pid
-		NODECMD=\`which node\`
 
-		iobroker_start ()
+		iobroker_start()
 		{
-			su -m $IOB_USER -s "$BASH_CMDLINE" -c "\${NODECMD} ${CONTROLLER_DIR}/iobroker.js start"
+			iobroker start
 		}
 
-		iobroker_stop ()
+		iobroker_stop()
 		{
-			su -m $IOB_USER -s "$BASH_CMDLINE" -c "\${NODECMD} ${CONTROLLER_DIR}/iobroker.js stop"
+			iobroker stop
 		}
 
-		iobroker_status ()
+		iobroker_status()
 		{
-			su -m $IOB_USER -s "$BASH_CMDLINE" -c "\${NODECMD} ${CONTROLLER_DIR}/iobroker.js status"
+			iobroker status
 		}
 
 		PATH="\${PATH}:/usr/local/bin"
@@ -838,11 +368,7 @@ elif [ "$INITSYSTEM" = "rc.d" ]; then
 	)
 
 	# Create the startup file, give it the correct permissions and start ioBroker
-	if [ "$IS_ROOT" = true ]; then
-		echo "$RCD_FILE" > $SERVICE_FILENAME
-	else
-		echo "$RCD_FILE" | sudo tee $SERVICE_FILENAME &> /dev/null
-	fi
+	write_to_file "$RCD_FILE" $SERVICE_FILENAME
 	set_root_permissions $SERVICE_FILENAME
 
 	# Enable startup
@@ -850,6 +376,7 @@ elif [ "$INITSYSTEM" = "rc.d" ]; then
 
 	echo "Autostart enabled!"
 	echo "Autostart: rc.d" >> "$INSTALLER_INFO_FILE"
+
 elif [ "$INITSYSTEM" = "launchctl" ]; then
 	echo "Enabling autostart..."
 
